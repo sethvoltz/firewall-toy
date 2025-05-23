@@ -47,8 +47,6 @@ unsigned long statusBlinkLast = 0;
 bool statusBlinkState = false;
 
 struct Settings {
-  String ssid = "";
-  String password = "";
   String mdnsName = "firewalltoy";
 };
 
@@ -69,13 +67,14 @@ uint8_t flameStep = 0;
 // TODO: Move to header file
 void animationSetup();
 void animationLoop();
+void animationFrame();
 void coapSetup();
 void coapLoop();
 void wifiSetup();
 void mdnsSetup();
-void handlePutColor(CoapPacket &packet, IPAddress ip, int port);
 void loadSettings();
 void saveSettings();
+void handlePutMode(CoapPacket &packet, IPAddress ip, int port);
 void setStatusColor(uint8_t r, uint8_t g, uint8_t b);
 HSV lerpHSV(const HSV& c1, const HSV& c2, float t);
 HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
@@ -142,24 +141,23 @@ void animationSetup() {
   flameStep = 0;
 }
 
-void setStatusColor(uint8_t r, uint8_t g, uint8_t b) {
-  strip.fill(strip.Color(r, g, b));
-  strip.show();
-}
-
 void animationLoop() {
-  static uint8_t hue = 0;
   static unsigned long lastUpdate = 0;
   unsigned long now = millis();
+
   if (now - lastUpdate >= ANIMATION_MS) {
+    lastUpdate = now;
+
     // Status LED logic
     switch (statusMode) {
       case STATUS_BOOT:
         setStatusColor(0, 255, 255); // Cyan
         break;
+
       case STATUS_WIFI_CONNECTING:
         setStatusColor(0, 0, 255); // Blue
         break;
+
       case STATUS_PORTAL:
         if (now - statusBlinkLast > 500) {
           statusBlinkLast = now;
@@ -168,44 +166,52 @@ void animationLoop() {
           else setStatusColor(0, 0, 0); // Off
         }
         break;
-    }
 
-    // Only run animation if not in status mode
-    if (statusMode == STATUS_READY) {
-      if (currentMode == ANIMATION_STATIC) {
-        uint32_t color = strip.Color(currentR, currentG, currentB);
-        for (int i = 0; i < NUM_LEDS; i++) {
-          strip.setPixelColor(i, color);
-        }
-        strip.show();
-      } else if (currentMode == ANIMATION_FLAME) {
-        float t = (float)flameStep / (float)FLAME_BLEND_STEPS;
-        for (int i = 0; i < NUM_LEDS; i++) {
-          HSV blended = lerpHSV(currentColors[i], targetColors[i], t);
-          uint32_t color = strip.ColorHSV((uint16_t)(blended.h * 65535.0f), (uint8_t)(blended.s * 255.0f), (uint8_t)(blended.v * 255.0f));
-          strip.setPixelColor(i, color);
-        }
-        strip.show();
-        flameStep++;
-        if (flameStep > FLAME_BLEND_STEPS) {
-          flameStep = 0;
-          for (int i = 0; i < NUM_LEDS; i++) {
-            currentColors[i] = targetColors[i];
-            HSV base = rgbToHsv(currentR, currentG, currentB);
-            targetColors[i] = flameColor(base);
-          }
-        }
-      }
+      case STATUS_READY:
+        animationFrame();
+        break;
     }
-    lastUpdate = now;
   }
 }
+
+void animationFrame() {
+  if (currentMode == ANIMATION_STATIC) {
+    uint32_t color = strip.Color(currentR, currentG, currentB);
+    for (int i = 0; i < NUM_LEDS; i++) {
+      strip.setPixelColor(i, color);
+    }
+    strip.show();
+  } else if (currentMode == ANIMATION_FLAME) {
+    float t = (float)flameStep / (float)FLAME_BLEND_STEPS;
+    for (int i = 0; i < NUM_LEDS; i++) {
+      HSV blended = lerpHSV(currentColors[i], targetColors[i], t);
+      uint32_t color = strip.ColorHSV((uint16_t)(blended.h * 65535.0f), (uint8_t)(blended.s * 255.0f), (uint8_t)(blended.v * 255.0f));
+      strip.setPixelColor(i, color);
+    }
+    strip.show();
+    flameStep++;
+    if (flameStep > FLAME_BLEND_STEPS) {
+      flameStep = 0;
+      for (int i = 0; i < NUM_LEDS; i++) {
+        currentColors[i] = targetColors[i];
+        HSV base = rgbToHsv(currentR, currentG, currentB);
+        targetColors[i] = flameColor(base);
+      }
+    }
+  }
+}
+
+void setStatusColor(uint8_t r, uint8_t g, uint8_t b) {
+  strip.fill(strip.Color(r, g, b));
+  strip.show();
+}
+
 
 // CoAP
 void coapSetup() {
   Serial.println("[CoAP] Starting UDP and registering /mode handler");
   udp.begin(5683);
-  coap.server(handlePutColor, "mode");
+  coap.server(handlePutMode, "mode");
   Serial.println("[CoAP] CoAP server ready");
 }
 
@@ -213,7 +219,7 @@ void coapLoop() {
   coap.loop();
 }
 
-void handlePutColor(CoapPacket &packet, IPAddress ip, int port) {
+void handlePutMode(CoapPacket &packet, IPAddress ip, int port) {
   Serial.print("[CoAP] PUT /mode from ");
   Serial.print(ip);
   Serial.print(":");
@@ -241,13 +247,18 @@ void handlePutColor(CoapPacket &packet, IPAddress ip, int port) {
   }
   Serial.print("[CoAP] Mode: ");
   Serial.println(mode);
-  JsonObject color = doc["color"].as<JsonObject>();
-  currentR = color["r"] | 0;
-  currentG = color["g"] | 0;
-  currentB = color["b"] | 0;
+
+  // Only update color if present
+  if (doc.containsKey("color")) {
+    JsonObject color = doc["color"].as<JsonObject>();
+    if (color.containsKey("r")) currentR = color["r"];
+    if (color.containsKey("g")) currentG = color["g"];
+    if (color.containsKey("b")) currentB = color["b"];
+  }
+
   Serial.printf("[CoAP] Color: r=%d, g=%d, b=%d\n", currentR, currentG, currentB);
-  Serial.println("[CoAP] LED color updated and response sent");
   coap.sendResponse(ip, port, packet.messageid, "OK");
+  Serial.println("[CoAP] LED color updated and response sent");
 }
 
 
@@ -268,14 +279,9 @@ void wifiSetup() {
   wifiManager.setAPCallback([](WiFiManager*) {
     statusMode = STATUS_PORTAL;
   });
-
   wifiManager.autoConnect(apName.c_str());
-  Serial.print("[WiFi] Connected! IP address: ");
-  Serial.println(WiFi.localIP());
 
-  // Save credentials and mDNS name to settings struct for later use
-  settings.ssid = WiFi.SSID();
-  settings.password = WiFi.psk();
+  // Save extra settings
   settings.mdnsName = String(mdnsParam.getValue());
   saveSettings();
 }
@@ -315,8 +321,6 @@ void loadSettings() {
     saveSettings();
     return;
   }
-  settings.ssid = doc["ssid"] | settings.ssid;
-  settings.password = doc["password"] | settings.password;
   settings.mdnsName = doc["mdnsName"] | settings.mdnsName;
   file.close();
 }
@@ -328,8 +332,6 @@ void saveSettings() {
     return;
   }
   StaticJsonDocument<256> doc;
-  doc["ssid"] = settings.ssid;
-  doc["password"] = settings.password;
   doc["mdnsName"] = settings.mdnsName;
   serializeJsonPretty(doc, file);
   file.close();

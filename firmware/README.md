@@ -21,6 +21,15 @@ Wipe the filesystem and wifi credentials:
 pio run --target erase
 ```
 
+Make CoAP requests to the device using `coap-client`:
+
+```bash
+brew install libcoap
+coap-client -m put -e '{"mode":"flame","color":{"r":255,"g":0,"b":255}}' coap://<ip>/mode
+```
+
+Note that while you can use the mDNS name in the `coap://` URL, there seems to be an issue with resolution within `coap-client` that makes it slow (~5s per request). IP addresses return instantly.
+
 
 ## Kudos
 

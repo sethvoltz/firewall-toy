@@ -201,9 +201,7 @@ void coapLoop() {
 void handlePutMode(CoapPacket &packet, IPAddress ip, int port) {
   Serial.print("[CoAP] PUT /mode from ");
   Serial.print(ip);
-  Serial.print(":");
-  Serial.println(port);
-  Serial.print("[CoAP] Payload: ");
+  Serial.print(", payload: ");
   for (size_t i = 0; i < packet.payloadlen; i++) Serial.print((char)packet.payload[i]);
   Serial.println();
 
@@ -224,6 +222,7 @@ void handlePutMode(CoapPacket &packet, IPAddress ip, int port) {
   } else if (strcmp(mode, "flame") == 0) {
     currentMode = ANIMATION_FLAME;
   }
+
   Serial.print("[CoAP] Mode: ");
   Serial.println(mode);
 

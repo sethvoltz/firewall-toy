@@ -10,6 +10,7 @@
 #include <WiFiManager.h>
 #include <WebServer.h>
 
+
 // =---------------------------------------------------------------------------------= Settings =--=
 
 #define LED_PIN                     D1
@@ -20,48 +21,20 @@
 #define FLAME_BLEND_STEPS           8
 
 
-// =----------------------------------------------------------------------------------= Globals =--=
+// =----------------------------------------------------------------------------------= Structs =--=
 
-Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
-WiFiUDP udp;
-Coap coap(udp);
-WebServer server(80);
-
-// Animation Mode
 enum AnimationMode {
   ANIMATION_STATIC,
   ANIMATION_FLAME
 };
 
-AnimationMode currentMode = ANIMATION_FLAME;
-uint8_t currentR = 255, currentG = 110, currentB = 15;
-
-// System Mode
-enum StatusMode {
-  STATUS_BOOT,
-  STATUS_WIFI_CONNECTING,
-  STATUS_PORTAL,
-  STATUS_READY
-};
-
-StatusMode statusMode = STATUS_BOOT;
-unsigned long statusBlinkLast = 0;
-bool statusBlinkState = false;
-
 struct Settings {
   String mdnsName = "firewalltoy";
 };
 
-Settings settings;
-
-// Flame animation state
 struct HSV {
   float h, s, v;
 };
-
-HSV currentColors[NUM_LEDS];
-HSV targetColors[NUM_LEDS];
-uint8_t flameStep = 0;
 
 
 // =-------------------------------------------------------------------------------= Signatures =--=
@@ -83,9 +56,31 @@ HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
 HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
 void httpSetup();
 
+
+// =----------------------------------------------------------------------------------= Globals =--=
+
+Settings settings;
+
+// Network
+bool wifiFeaturesEnabled = false;
+WiFiUDP udp;
+Coap coap(udp);
+WebServer server(80);
+
+// Animation
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+AnimationMode currentMode = ANIMATION_FLAME;
+uint8_t currentR = 255, currentG = 110, currentB = 15;
+
+// Flame animation state
+HSV currentColors[NUM_LEDS];
+HSV targetColors[NUM_LEDS];
+uint8_t flameStep = 0;
+
+
 // =--------------------------------------------------------------------------------= Functions =--=
 
-// Helper: Linear interpolation between two HSV colors, handling hue wraparound
+// Linear interpolation between two HSV colors, handling hue wraparound
 HSV lerpHSV(const HSV& c1, const HSV& c2, float t) {
   HSV out;
   float dh = c2.h - c1.h;
@@ -100,12 +95,14 @@ HSV lerpHSV(const HSV& c1, const HSV& c2, float t) {
   return out;
 }
 
-// Helper: Generate a random float between a and b, similar to Python's random.uniform(a, b)
+// Generate a random float between a and b, similar to Python's random.uniform(a, b)
+// Note: uniform detects the number of decimals of the floats and randomizes that range. This hard
+// codes to 2 places to match expected behavior
 float randomFloat(float a, float b) {
-  return a + ((b - a) * random(0, 1001) / 1000.0);
+  return a + ((b - a) * random(0, 101) / 100.0);
 }
 
-// Helper: Jitter a base HSV color for flame effect
+// Jitter a base HSV color for flame effect
 HSV flameColor(const HSV& base, float h_jitter = 0.01f, float s_jitter = 0.05f, float v_jitter = 0.4f) {
   HSV out = base;
   out.h = fmodf(base.h + randomFloat(-h_jitter, h_jitter), 1.0f);
@@ -114,7 +111,7 @@ HSV flameColor(const HSV& base, float h_jitter = 0.01f, float s_jitter = 0.05f, 
   return out;
 }
 
-// Helper: Convert RGB (0-255) to HSV (0-1)
+// Convert RGB (0-255) to HSV (0-1)
 HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b) {
   float fr = r / 255.0f, fg = g / 255.0f, fb = b / 255.0f;
   float mx = fmaxf(fr, fmaxf(fg, fb)), mn = fminf(fr, fminf(fg, fb));
@@ -141,6 +138,8 @@ void animationSetup() {
     currentColors[i] = base;
     targetColors[i] = flameColor(base);
   }
+
+  setStatusColor(0, 255, 255);
 }
 
 void animationLoop() {
@@ -150,54 +149,32 @@ void animationLoop() {
   if (now - lastUpdate >= ANIMATION_MS) {
     lastUpdate = now;
 
-    // Status LED logic
-    switch (statusMode) {
-      case STATUS_BOOT:
-        setStatusColor(0, 255, 255); // Cyan
-        break;
-
-      case STATUS_WIFI_CONNECTING:
-        setStatusColor(0, 0, 255); // Blue
-        break;
-
-      case STATUS_PORTAL:
-        if (now - statusBlinkLast > 500) {
-          statusBlinkLast = now;
-          statusBlinkState = !statusBlinkState;
-          if (statusBlinkState) setStatusColor(0, 0, 255); // Blue
-          else setStatusColor(0, 0, 0); // Off
-        }
-        break;
-
-      case STATUS_READY:
-        animationFrame();
-        break;
-    }
-  }
-}
-
-void animationFrame() {
-  if (currentMode == ANIMATION_STATIC) {
-    uint32_t color = strip.Color(currentR, currentG, currentB);
-    for (int i = 0; i < NUM_LEDS; i++) {
-      strip.setPixelColor(i, color);
-    }
-    strip.show();
-  } else if (currentMode == ANIMATION_FLAME) {
-    float t = (float)flameStep / (float)FLAME_BLEND_STEPS;
-    for (int i = 0; i < NUM_LEDS; i++) {
-      HSV blended = lerpHSV(currentColors[i], targetColors[i], t);
-      uint32_t color = strip.ColorHSV((uint16_t)(blended.h * 65535.0f), (uint8_t)(blended.s * 255.0f), (uint8_t)(blended.v * 255.0f));
-      strip.setPixelColor(i, color);
-    }
-    strip.show();
-    flameStep++;
-    if (flameStep > FLAME_BLEND_STEPS) {
-      flameStep = 0;
+    if (currentMode == ANIMATION_STATIC) {
+      uint32_t color = strip.Color(currentR, currentG, currentB);
       for (int i = 0; i < NUM_LEDS; i++) {
-        currentColors[i] = targetColors[i];
-        HSV base = rgbToHsv(currentR, currentG, currentB);
-        targetColors[i] = flameColor(base);
+        strip.setPixelColor(i, color);
+      }
+      strip.show();
+    } else if (currentMode == ANIMATION_FLAME) {
+      float t = (float)flameStep / (float)FLAME_BLEND_STEPS;
+      for (int i = 0; i < NUM_LEDS; i++) {
+        HSV blended = lerpHSV(currentColors[i], targetColors[i], t);
+        uint32_t color = strip.ColorHSV(
+          (uint16_t)(blended.h * 65535.0f),
+          (uint8_t)(blended.s * 255.0f),
+          (uint8_t)(blended.v * 255.0f)
+        );
+        strip.setPixelColor(i, color);
+      }
+      strip.show();
+      flameStep++;
+      if (flameStep > FLAME_BLEND_STEPS) {
+        flameStep = 0;
+        for (int i = 0; i < NUM_LEDS; i++) {
+          currentColors[i] = targetColors[i];
+          HSV base = rgbToHsv(currentR, currentG, currentB);
+          targetColors[i] = flameColor(base);
+        }
       }
     }
   }
@@ -266,7 +243,7 @@ void handlePutMode(CoapPacket &packet, IPAddress ip, int port) {
 
 // WIFI & mDNS
 void wifiSetup() {
-  statusMode = STATUS_WIFI_CONNECTING;
+  setStatusColor(0, 0, 255);
 
   Serial.println("[WiFi] Starting WiFiManager for captive portal if needed...");
   WiFiManager wifiManager;
@@ -279,9 +256,10 @@ void wifiSetup() {
 
   // Set status to portal mode if config portal is started
   wifiManager.setAPCallback([](WiFiManager*) {
-    statusMode = STATUS_PORTAL;
+    setStatusColor(255, 0, 255);
   });
   wifiManager.autoConnect(apName.c_str());
+  wifiFeaturesEnabled = true;
 
   // Save extra settings
   settings.mdnsName = String(mdnsParam.getValue());
@@ -399,15 +377,19 @@ void setup() {
   loadSettings();
   animationSetup();
   wifiSetup();
-  mdnsSetup();
-  coapSetup();
-  httpSetup();
 
-  statusMode = STATUS_READY;
+  if (wifiFeaturesEnabled) {
+    mdnsSetup();
+    coapSetup();
+    httpSetup();
+  }
 }
 
 void loop() {
   animationLoop();
-  coapLoop();
-  httpLoop();
+
+  if (wifiFeaturesEnabled) {
+    coapLoop();
+    httpLoop();
+  }
 }

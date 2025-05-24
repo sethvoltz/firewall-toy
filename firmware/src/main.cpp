@@ -8,6 +8,7 @@
 #include <FS.h>
 #include <SPIFFS.h>
 #include <WiFiManager.h>
+#include <WebServer.h>
 
 // =---------------------------------------------------------------------------------= Settings =--=
 
@@ -24,6 +25,7 @@
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 WiFiUDP udp;
 Coap coap(udp);
+WebServer server(80);
 
 // Animation Mode
 enum AnimationMode {
@@ -79,6 +81,7 @@ void setStatusColor(uint8_t r, uint8_t g, uint8_t b);
 HSV lerpHSV(const HSV& c1, const HSV& c2, float t);
 HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
 HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
+void httpSetup();
 
 // =--------------------------------------------------------------------------------= Functions =--=
 
@@ -138,7 +141,6 @@ void animationSetup() {
     currentColors[i] = base;
     targetColors[i] = flameColor(base);
   }
-  flameStep = 0;
 }
 
 void animationLoop() {
@@ -337,6 +339,56 @@ void saveSettings() {
   file.close();
 }
 
+// HTTP Server
+void httpSetup() {
+  server.on("/", HTTP_GET, []() {
+    File file = SPIFFS.open("/index.html", "r");
+    if (!file) {
+      server.send(404, "text/plain", "index.html not found");
+      return;
+    }
+    server.streamFile(file, "text/html");
+    file.close();
+  });
+
+  server.on("/main.js", HTTP_GET, []() {
+    File file = SPIFFS.open("/main.js", "r");
+    if (!file) {
+      server.send(404, "text/plain", "main.js not found");
+      return;
+    }
+    server.streamFile(file, "application/javascript");
+    file.close();
+  });
+
+  server.on("/favicon.ico", HTTP_GET, []() {
+    File file = SPIFFS.open("/favicon.ico", "r");
+    if (!file) {
+      server.send(404, "text/plain", "favicon.ico not found");
+      return;
+    }
+    server.streamFile(file, "image/x-icon");
+    file.close();
+  });
+
+  // Example API endpoint: echo
+  server.on("/api/echo", HTTP_POST, []() {
+    String body = server.arg("plain");
+    server.send(200, "application/json", body);
+  });
+
+  // 404 handler
+  server.onNotFound([]() {
+    server.send(404, "text/plain", "Not found");
+  });
+
+  server.begin();
+  Serial.println("[HTTP] Web server started on port 80");
+}
+
+void httpLoop() {
+  server.handleClient();
+}
 
 // =-------------------------------------------------------------------------------------= Main =--=
 
@@ -349,6 +401,7 @@ void setup() {
   wifiSetup();
   mdnsSetup();
   coapSetup();
+  httpSetup();
 
   statusMode = STATUS_READY;
 }
@@ -356,4 +409,5 @@ void setup() {
 void loop() {
   animationLoop();
   coapLoop();
+  httpLoop();
 }

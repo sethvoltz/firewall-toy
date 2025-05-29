@@ -6,8 +6,7 @@ A cute desk toy in the shape of a firewall (a wall... on fire) that can display 
 
 See the [Firmware README](firmware/README.md) for more details on how to set up and use the firmware.
 
-
-## Notes
+See the [Webapp README](webapp/README.md) for more details on how to set up and use the web application.
 
 
 ## Enhancements

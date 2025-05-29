@@ -6,7 +6,7 @@
 #include <WiFiUdp.h>
 #include <ESPmDNS.h>
 #include <FS.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <WiFiManager.h>
 #include <WebServer.h>
 
@@ -278,16 +278,16 @@ void mdnsSetup() {
 
 // Settings
 void loadSettings() {
-  if (!SPIFFS.begin(true)) {
-    Serial.println("[FS] Failed to mount SPIFFS");
+  if (!LittleFS.begin(true)) {
+    Serial.println("[FS] Failed to mount LittleFS");
     return;
   }
-  if (!SPIFFS.exists(SETTINGS_PATH)) {
+  if (!LittleFS.exists(SETTINGS_PATH)) {
     Serial.println("[FS] settings.json not found, creating default");
     saveSettings();
     return;
   }
-  File file = SPIFFS.open(SETTINGS_PATH, "r");
+  File file = LittleFS.open(SETTINGS_PATH, "r");
   if (!file) {
     Serial.println("[FS] Failed to open settings.json");
     return;
@@ -305,7 +305,7 @@ void loadSettings() {
 }
 
 void saveSettings() {
-  File file = SPIFFS.open(SETTINGS_PATH, "w");
+  File file = LittleFS.open(SETTINGS_PATH, "w");
   if (!file) {
     Serial.println("[FS] Failed to open settings.json for writing");
     return;
@@ -319,7 +319,7 @@ void saveSettings() {
 // HTTP Server
 void httpSetup() {
   server.on("/", HTTP_GET, []() {
-    File file = SPIFFS.open("/index.html", "r");
+    File file = LittleFS.open("/index.html", "r");
     if (!file) {
       server.send(404, "text/plain", "index.html not found");
       return;
@@ -328,23 +328,48 @@ void httpSetup() {
     file.close();
   });
 
-  server.on("/main.js", HTTP_GET, []() {
-    File file = SPIFFS.open("/main.js", "r");
+  server.on("/favicon.png", HTTP_GET, []() {
+    File file = LittleFS.open("/favicon.png", "r");
     if (!file) {
-      server.send(404, "text/plain", "main.js not found");
+      server.send(404, "text/plain", "favicon.png not found");
       return;
     }
-    server.streamFile(file, "application/javascript");
+
+    server.streamFile(file, "image/png");
     file.close();
   });
 
-  server.on("/favicon.ico", HTTP_GET, []() {
-    File file = SPIFFS.open("/favicon.ico", "r");
-    if (!file) {
-      server.send(404, "text/plain", "favicon.ico not found");
+  // Serve all /_app/* files dynamically from LittleFS
+  server.onNotFound([]() {
+    String path = server.uri();
+    if (path.startsWith("/_app/")) {
+      String fsPath = path;
+      File file = LittleFS.open(fsPath.c_str(), "r");
+      if (!file) {
+        server.send(404, "text/plain", "File not found");
+        return;
+      }
+      // Basic content type detection
+      String contentType = "application/octet-stream";
+      if (path.endsWith(".js")) contentType = "application/javascript";
+      else if (path.endsWith(".css")) contentType = "text/css";
+      else if (path.endsWith(".json")) contentType = "application/json";
+      else if (path.endsWith(".png")) contentType = "image/png";
+      else if (path.endsWith(".ico")) contentType = "image/x-icon";
+      else if (path.endsWith(".html")) contentType = "text/html";
+      server.streamFile(file, contentType);
+      file.close();
       return;
     }
-    server.streamFile(file, "image/x-icon");
+
+    // Fallback: serve index.html for SPA routing
+    File file = LittleFS.open("/index.html", "r");
+    if (!file) {
+      server.send(404, "text/plain", "index.html not found");
+      return;
+    }
+
+    server.streamFile(file, "text/html");
     file.close();
   });
 
@@ -352,11 +377,6 @@ void httpSetup() {
   server.on("/api/echo", HTTP_POST, []() {
     String body = server.arg("plain");
     server.send(200, "application/json", body);
-  });
-
-  // 404 handler
-  server.onNotFound([]() {
-    server.send(404, "text/plain", "Not found");
   });
 
   server.begin();

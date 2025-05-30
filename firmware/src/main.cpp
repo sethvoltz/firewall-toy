@@ -55,6 +55,9 @@ HSV lerpHSV(const HSV& c1, const HSV& c2, float t);
 HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
 HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
 void httpSetup();
+void handleApiEcho();
+void handleApiMode();
+void setModeAndColorFromJson(JsonVariantConst doc);
 
 
 // =----------------------------------------------------------------------------------= Globals =--=
@@ -215,26 +218,7 @@ void handlePutMode(CoapPacket &packet, IPAddress ip, int port) {
     return;
   }
 
-  // Expecting: {"mode": "static"|"flame", "color": {"r":0-255, "g":0-255, "b":0-255}}
-  const char* mode = doc["mode"] | "static";
-  if (strcmp(mode, "static") == 0) {
-    currentMode = ANIMATION_STATIC;
-  } else if (strcmp(mode, "flame") == 0) {
-    currentMode = ANIMATION_FLAME;
-  }
-
-  Serial.print("[CoAP] Mode: ");
-  Serial.println(mode);
-
-  // Only update color if present
-  if (doc.containsKey("color")) {
-    JsonObject color = doc["color"].as<JsonObject>();
-    if (color.containsKey("r")) currentR = color["r"];
-    if (color.containsKey("g")) currentG = color["g"];
-    if (color.containsKey("b")) currentB = color["b"];
-  }
-
-  Serial.printf("[CoAP] Color: r=%d, g=%d, b=%d\n", currentR, currentG, currentB);
+  setModeAndColorFromJson(doc.as<JsonVariantConst>());
   coap.sendResponse(ip, port, packet.messageid, "OK");
   Serial.println("[CoAP] LED color updated and response sent");
 }
@@ -316,6 +300,52 @@ void saveSettings() {
   file.close();
 }
 
+// --- Mode/Color Setter (shared by CoAP and HTTP) ---
+void setModeAndColorFromJson(JsonVariantConst doc) {
+  // Expecting: {"mode": "static"|"flame", "color": {"r":0-255, "g":0-255, "b":0-255}}
+  const char* mode = doc["mode"] | "static";
+  if (strcmp(mode, "static") == 0) {
+    currentMode = ANIMATION_STATIC;
+  } else if (strcmp(mode, "flame") == 0) {
+    currentMode = ANIMATION_FLAME;
+  }
+
+  // Only update color if present
+  if (doc.containsKey("color")) {
+    JsonVariantConst color = doc["color"];
+    if (color.containsKey("r")) currentR = color["r"];
+    if (color.containsKey("g")) currentG = color["g"];
+    if (color.containsKey("b")) currentB = color["b"];
+  }
+
+  Serial.printf("[Mode/Color] Mode: %s, Color: r=%d, g=%d, b=%d\n", mode, currentR, currentG, currentB);
+}
+
+// --- API Handlers ---
+void handleApiEcho() {
+  Serial.println("[HTTP] /api/echo called");
+  String body = server.arg("plain");
+  Serial.print("[HTTP] Echo body: ");
+  Serial.println(body);
+  server.send(200, "application/json", body);
+}
+
+void handleApiMode() {
+  Serial.println("[HTTP] /api/mode called");
+  String body = server.arg("plain");
+  Serial.print("[HTTP] Mode body: ");
+  Serial.println(body);
+  StaticJsonDocument<192> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    Serial.println("[HTTP] Invalid JSON received in /api/mode");
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  setModeAndColorFromJson(doc.as<JsonVariantConst>());
+  server.send(200, "application/json", "{\"status\":\"OK\"}");
+}
+
 // HTTP Server
 void httpSetup() {
   server.on("/", HTTP_GET, []() {
@@ -373,11 +403,8 @@ void httpSetup() {
     file.close();
   });
 
-  // Example API endpoint: echo
-  server.on("/api/echo", HTTP_POST, []() {
-    String body = server.arg("plain");
-    server.send(200, "application/json", body);
-  });
+  server.on("/api/echo", HTTP_POST, handleApiEcho);
+  server.on("/api/mode", HTTP_POST, handleApiMode);
 
   server.begin();
   Serial.println("[HTTP] Web server started on port 80");

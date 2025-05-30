@@ -143,7 +143,7 @@
       const data = await res.json();
       results = [
         ...results,
-        { timestamp: new Date().toLocaleString(), data: { nightSet: data } }
+        { timestamp: new Date().toLocaleString(), data: { brightness: data } }
       ];
     } catch (e: any) {
       nightApiError = e.message;

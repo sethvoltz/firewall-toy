@@ -19,7 +19,7 @@
 #define BRIGHTNESS                  128
 #define ANIMATION_MS                33
 #define SETTINGS_PATH               "/settings.json"
-#define FLAME_BLEND_STEPS           8
+#define FLAME_BLEND_STEPS           6
 #define BRIGHTNESS_BLEND_STEPS      150
 
 

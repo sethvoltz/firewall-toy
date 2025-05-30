@@ -9,6 +9,7 @@
 #include <LittleFS.h>
 #include <WiFiManager.h>
 #include <WebServer.h>
+#include <NTPClient.h>
 
 
 // =---------------------------------------------------------------------------------= Settings =--=
@@ -19,6 +20,7 @@
 #define ANIMATION_MS                33
 #define SETTINGS_PATH               "/settings.json"
 #define FLAME_BLEND_STEPS           8
+#define BRIGHTNESS_BLEND_STEPS      150
 
 
 // =----------------------------------------------------------------------------------= Structs =--=
@@ -30,6 +32,14 @@ enum AnimationMode {
 
 struct Settings {
   String mdnsName = "firewalltoy";
+};
+
+struct BrightnessConfig {
+  bool nightModeEnabled = false;
+  int nightStartHour = 22; // 22:00
+  int nightEndHour = 7;   // 07:00
+  uint8_t dayBrightness = 128;
+  uint8_t nightBrightness = 32;
 };
 
 struct HSV {
@@ -57,12 +67,17 @@ HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
 void httpSetup();
 void handleApiEcho();
 void handleApiMode();
+void handleApiBrightnessGet();
+void handleApiBrightnessPost();
 void setModeAndColorFromJson(JsonVariantConst doc);
+void ntpSetup();
+void ntpLoop();
 
 
 // =----------------------------------------------------------------------------------= Globals =--=
 
 Settings settings;
+BrightnessConfig brightnessConfig;
 
 // Network
 bool wifiFeaturesEnabled = false;
@@ -79,6 +94,10 @@ uint8_t currentR = 255, currentG = 110, currentB = 15;
 HSV currentColors[NUM_LEDS];
 HSV targetColors[NUM_LEDS];
 uint8_t flameStep = 0;
+
+// NTP Client
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // UTC, update every 60s
 
 
 // =--------------------------------------------------------------------------------= Functions =--=
@@ -147,7 +166,34 @@ void animationSetup() {
 
 void animationLoop() {
   static unsigned long lastUpdate = 0;
+  static float currentBrightness = BRIGHTNESS;
   unsigned long now = millis();
+
+  // Determine target brightness based on day/night config and NTP time
+  uint8_t targetBrightness = brightnessConfig.dayBrightness;
+  if (brightnessConfig.nightModeEnabled && timeClient.isTimeSet()) {
+    int hour = timeClient.getHours();
+    bool isNight = false;
+    if (brightnessConfig.nightStartHour < brightnessConfig.nightEndHour) {
+      // Night does not cross midnight
+      isNight = (hour >= brightnessConfig.nightStartHour && hour < brightnessConfig.nightEndHour);
+    } else {
+      // Night crosses midnight
+      isNight = (hour >= brightnessConfig.nightStartHour || hour < brightnessConfig.nightEndHour);
+    }
+    if (isNight) {
+      targetBrightness = brightnessConfig.nightBrightness;
+    }
+  }
+
+  // Tween brightness
+  float step = (targetBrightness - currentBrightness) / BRIGHTNESS_BLEND_STEPS;
+  if (fabs(step) < 0.5f) {
+    currentBrightness = targetBrightness;
+  } else {
+    currentBrightness += step;
+  }
+  strip.setBrightness((uint8_t)roundf(currentBrightness));
 
   if (now - lastUpdate >= ANIMATION_MS) {
     lastUpdate = now;
@@ -285,6 +331,14 @@ void loadSettings() {
     return;
   }
   settings.mdnsName = doc["mdnsName"] | settings.mdnsName;
+
+  // Load brightness config
+  brightnessConfig.nightModeEnabled = doc["nightModeEnabled"] | brightnessConfig.nightModeEnabled;
+  brightnessConfig.nightStartHour = doc["nightStartHour"] | brightnessConfig.nightStartHour;
+  brightnessConfig.nightEndHour = doc["nightEndHour"] | brightnessConfig.nightEndHour;
+  brightnessConfig.dayBrightness = doc["dayBrightness"] | brightnessConfig.dayBrightness;
+  brightnessConfig.nightBrightness = doc["nightBrightness"] | brightnessConfig.nightBrightness;
+
   file.close();
 }
 
@@ -296,6 +350,14 @@ void saveSettings() {
   }
   StaticJsonDocument<256> doc;
   doc["mdnsName"] = settings.mdnsName;
+
+  // Save brightness config
+  doc["nightModeEnabled"] = brightnessConfig.nightModeEnabled;
+  doc["nightStartHour"] = brightnessConfig.nightStartHour;
+  doc["nightEndHour"] = brightnessConfig.nightEndHour;
+  doc["dayBrightness"] = brightnessConfig.dayBrightness;
+  doc["nightBrightness"] = brightnessConfig.nightBrightness;
+
   serializeJsonPretty(doc, file);
   file.close();
 }
@@ -321,7 +383,7 @@ void setModeAndColorFromJson(JsonVariantConst doc) {
   Serial.printf("[Mode/Color] Mode: %s, Color: r=%d, g=%d, b=%d\n", mode, currentR, currentG, currentB);
 }
 
-// --- API Handlers ---
+// API Handlers
 void handleApiEcho() {
   Serial.println("[HTTP] /api/echo called");
   String body = server.arg("plain");
@@ -343,6 +405,36 @@ void handleApiMode() {
     return;
   }
   setModeAndColorFromJson(doc.as<JsonVariantConst>());
+  server.send(200, "application/json", "{\"status\":\"OK\"}");
+}
+
+// --- Brightness API Handlers ---
+void handleApiBrightnessGet() {
+  StaticJsonDocument<192> doc;
+  doc["nightModeEnabled"] = brightnessConfig.nightModeEnabled;
+  doc["nightStartHour"] = brightnessConfig.nightStartHour;
+  doc["nightEndHour"] = brightnessConfig.nightEndHour;
+  doc["dayBrightness"] = brightnessConfig.dayBrightness;
+  doc["nightBrightness"] = brightnessConfig.nightBrightness;
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+void handleApiBrightnessPost() {
+  String body = server.arg("plain");
+  StaticJsonDocument<192> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  if (doc.containsKey("nightModeEnabled")) brightnessConfig.nightModeEnabled = doc["nightModeEnabled"];
+  if (doc.containsKey("nightStartHour")) brightnessConfig.nightStartHour = doc["nightStartHour"];
+  if (doc.containsKey("nightEndHour")) brightnessConfig.nightEndHour = doc["nightEndHour"];
+  if (doc.containsKey("dayBrightness")) brightnessConfig.dayBrightness = doc["dayBrightness"];
+  if (doc.containsKey("nightBrightness")) brightnessConfig.nightBrightness = doc["nightBrightness"];
+  saveSettings();
   server.send(200, "application/json", "{\"status\":\"OK\"}");
 }
 
@@ -405,6 +497,8 @@ void httpSetup() {
 
   server.on("/api/echo", HTTP_POST, handleApiEcho);
   server.on("/api/mode", HTTP_POST, handleApiMode);
+  server.on("/api/brightness", HTTP_GET, handleApiBrightnessGet);
+  server.on("/api/brightness", HTTP_POST, handleApiBrightnessPost);
 
   server.begin();
   Serial.println("[HTTP] Web server started on port 80");
@@ -414,11 +508,26 @@ void httpLoop() {
   server.handleClient();
 }
 
+// NTP Client
+void ntpSetup() {
+  timeClient.begin();
+  if (timeClient.forceUpdate()) {
+    Serial.print("[NTP] Time: ");
+    Serial.println(timeClient.getFormattedTime());
+  } else {
+    Serial.println("[NTP] Failed to get time");
+  }
+}
+
+void ntpLoop() {
+  timeClient.update();
+}
+
 // =-------------------------------------------------------------------------------------= Main =--=
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) { delay(10); } // Wait for serial port to be ready (important for some boards)
+  // while (!Serial) { delay(10); } // Uncomment this if you need serial output early
 
   loadSettings();
   animationSetup();
@@ -428,6 +537,7 @@ void setup() {
     mdnsSetup();
     coapSetup();
     httpSetup();
+    ntpSetup();
   }
 }
 
@@ -437,5 +547,6 @@ void loop() {
   if (wifiFeaturesEnabled) {
     coapLoop();
     httpLoop();
+    ntpLoop();
   }
 }

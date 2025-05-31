@@ -58,7 +58,7 @@
   }
 
   // Night mode state
-  let nightModeEnabled: boolean = false;
+  let nightEnabled: boolean = false;
   let nightStartLocal: string = "22:00"; // local time string, e.g. "22:00"
   let nightEndLocal: string = "07:00";
   let dayBrightness: number = 255;
@@ -87,7 +87,7 @@
     try {
       const res = await fetch("/api/brightness", { method: "GET" });
       const data = await res.json();
-      nightModeEnabled = !!data.nightModeEnabled;
+      nightEnabled = !!data.nightEnabled;
       nightStartLocal = utcHourToLocalTime(data.nightStartHour);
       nightEndLocal = utcHourToLocalTime(data.nightEndHour);
       dayBrightness = data.dayBrightness;
@@ -104,7 +104,7 @@
     nightApiError = "";
     try {
       const body = {
-        nightModeEnabled,
+        nightEnabled,
         nightStartHour: localTimeToUtcHour(nightStartLocal),
         nightEndHour: localTimeToUtcHour(nightEndLocal),
         dayBrightness,
@@ -242,7 +242,7 @@
 <form class="mb-4 space-y-3" on:submit|preventDefault={setNightSettings}>
   <div class="flex flex-col gap-3 max-w-md">
     <label class="flex items-center gap-2">
-      <input type="checkbox" bind:checked={nightModeEnabled} />
+      <input type="checkbox" bind:checked={nightEnabled} />
       Enable Night Mode
     </label>
     <div class="flex gap-4">

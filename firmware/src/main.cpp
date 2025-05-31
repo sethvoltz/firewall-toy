@@ -11,6 +11,7 @@
 #include <WebServer.h>
 #include <NTPClient.h>
 #include <ESPAsyncWebServer.h>
+#include <Preferences.h>
 
 
 // =---------------------------------------------------------------------------------= Settings =--=
@@ -37,7 +38,7 @@ struct Settings {
 };
 
 struct BrightnessConfig {
-  bool nightModeEnabled = false;
+  bool nightEnabled = false;
   int nightStartHour = 22; // 22:00
   int nightEndHour = 7;   // 07:00
   uint8_t dayBrightness = 128;
@@ -52,6 +53,7 @@ struct HSV {
 // =-------------------------------------------------------------------------------= Signatures =--=
 
 // TODO: Move to header file
+void filesystemSetup();
 void animationSetup();
 void animationLoop();
 void animationFrame();
@@ -109,6 +111,8 @@ uint8_t currentR = 255, currentG = 110, currentB = 15;
 HSV currentColors[NUM_LEDS];
 HSV targetColors[NUM_LEDS];
 uint8_t flameStep = 0;
+
+Preferences preferences;
 
 
 // =--------------------------------------------------------------------------------= Functions =--=
@@ -183,7 +187,7 @@ void animationLoop() {
 
   // Determine target brightness based on day/night config and NTP time
   uint8_t targetBrightness = brightnessConfig.dayBrightness;
-  if (brightnessConfig.nightModeEnabled && timeClient.isTimeSet()) {
+  if (brightnessConfig.nightEnabled && timeClient.isTimeSet()) {
     int hour = timeClient.getHours();
     bool isNight = false;
     if (brightnessConfig.nightStartHour < brightnessConfig.nightEndHour) {
@@ -323,60 +327,41 @@ void mdnsSetup() {
   }
 }
 
-// Settings
-void loadSettings() {
+// Filesystem
+void filesystemSetup() {
   if (!LittleFS.begin(true)) {
     Serial.println("[FS] Failed to mount LittleFS");
     return;
   }
-  if (!LittleFS.exists(SETTINGS_PATH)) {
-    Serial.println("[FS] settings.json not found, creating default");
-    saveSettings();
-    return;
-  }
-  File file = LittleFS.open(SETTINGS_PATH, "r");
-  if (!file) {
-    Serial.println("[FS] Failed to open settings.json");
-    return;
-  }
-  StaticJsonDocument<256> doc;
-  DeserializationError err = deserializeJson(doc, file);
-  if (err) {
-    Serial.println("[FS] Failed to parse settings.json, using defaults");
-    file.close();
-    saveSettings();
-    return;
-  }
-  settings.mdnsName = doc["mdnsName"] | settings.mdnsName;
+}
+
+// Settings
+void loadSettings() {
+  preferences.begin("firewall-toy", true); // read-only
+
+  settings.mdnsName = preferences.getString("mdnsName", settings.mdnsName);
 
   // Load brightness config
-  brightnessConfig.nightModeEnabled = doc["nightModeEnabled"] | brightnessConfig.nightModeEnabled;
-  brightnessConfig.nightStartHour = doc["nightStartHour"] | brightnessConfig.nightStartHour;
-  brightnessConfig.nightEndHour = doc["nightEndHour"] | brightnessConfig.nightEndHour;
-  brightnessConfig.dayBrightness = doc["dayBrightness"] | brightnessConfig.dayBrightness;
-  brightnessConfig.nightBrightness = doc["nightBrightness"] | brightnessConfig.nightBrightness;
+  brightnessConfig.nightEnabled = preferences.getBool("nightEnabled", brightnessConfig.nightEnabled);
+  brightnessConfig.nightStartHour = preferences.getInt("nightStartHour", brightnessConfig.nightStartHour);
+  brightnessConfig.nightEndHour = preferences.getInt("nightEndHour", brightnessConfig.nightEndHour);
+  brightnessConfig.dayBrightness = preferences.getUChar("dayBrightness", brightnessConfig.dayBrightness);
+  brightnessConfig.nightBrightness = preferences.getUChar("nightBrightness", brightnessConfig.nightBrightness);
 
-  file.close();
+  preferences.end();
 }
 
 void saveSettings() {
-  File file = LittleFS.open(SETTINGS_PATH, "w");
-  if (!file) {
-    Serial.println("[FS] Failed to open settings.json for writing");
-    return;
-  }
-  StaticJsonDocument<256> doc;
-  doc["mdnsName"] = settings.mdnsName;
+  preferences.begin("firewall-toy", false); // read+write
 
-  // Save brightness config
-  doc["nightModeEnabled"] = brightnessConfig.nightModeEnabled;
-  doc["nightStartHour"] = brightnessConfig.nightStartHour;
-  doc["nightEndHour"] = brightnessConfig.nightEndHour;
-  doc["dayBrightness"] = brightnessConfig.dayBrightness;
-  doc["nightBrightness"] = brightnessConfig.nightBrightness;
+  preferences.putString("mdnsName", settings.mdnsName);
+  preferences.putBool("nightEnabled", brightnessConfig.nightEnabled);
+  preferences.putInt("nightStartHour", brightnessConfig.nightStartHour);
+  preferences.putInt("nightEndHour", brightnessConfig.nightEndHour);
+  preferences.putUChar("dayBrightness", brightnessConfig.dayBrightness);
+  preferences.putUChar("nightBrightness", brightnessConfig.nightBrightness);
 
-  serializeJsonPretty(doc, file);
-  file.close();
+  preferences.end();
 }
 
 // --- Mode/Color Setter (shared by CoAP and HTTP) ---
@@ -424,11 +409,13 @@ void handleApiPostMode(AsyncWebServerRequest *request, uint8_t *data, size_t len
 
 void handleApiGetBrightness(AsyncWebServerRequest *request) {
   StaticJsonDocument<192> doc;
-  doc["nightModeEnabled"] = brightnessConfig.nightModeEnabled;
+
+  doc["nightEnabled"] = brightnessConfig.nightEnabled;
   doc["nightStartHour"] = brightnessConfig.nightStartHour;
   doc["nightEndHour"] = brightnessConfig.nightEndHour;
   doc["dayBrightness"] = brightnessConfig.dayBrightness;
   doc["nightBrightness"] = brightnessConfig.nightBrightness;
+
   String out;
   serializeJson(doc, out);
   request->send(200, "application/json", out);
@@ -444,7 +431,7 @@ void handleApiPostBrightness(AsyncWebServerRequest *request, uint8_t *data, size
     return;
   }
 
-  if (doc.containsKey("nightModeEnabled")) brightnessConfig.nightModeEnabled = doc["nightModeEnabled"];
+  if (doc.containsKey("nightEnabled")) brightnessConfig.nightEnabled = doc["nightEnabled"];
   if (doc.containsKey("nightStartHour")) brightnessConfig.nightStartHour = doc["nightStartHour"];
   if (doc.containsKey("nightEndHour")) brightnessConfig.nightEndHour = doc["nightEndHour"];
   if (doc.containsKey("dayBrightness")) brightnessConfig.dayBrightness = doc["dayBrightness"];
@@ -555,6 +542,7 @@ void setup() {
   Serial.begin(115200);
   // while (!Serial) { delay(10); } // Uncomment this if you need serial output early
 
+  filesystemSetup();
   loadSettings();
   animationSetup();
   wifiSetup();

@@ -68,7 +68,6 @@ HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
 HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
 void httpSetup();
 void handleApiPostRequest(AsyncWebServerRequest *request);
-void handleApiPostEcho(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
 void handleApiPostMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
 void handleApiGetBrightness(AsyncWebServerRequest *request);
 void handleApiPostBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
@@ -407,19 +406,6 @@ void handleApiPostRequest(AsyncWebServerRequest *request) {
   Serial.printf("[HTTP] %s called\n", path.c_str());
 }
 
-void handleApiPostEcho(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  String body = String((const char*)data, len);
-  Serial.print("[HTTP] /api/echo body: ");
-  Serial.println(body);
-  StaticJsonDocument<192> doc;
-  DeserializationError err = deserializeJson(doc, body);
-  if (err) {
-    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-    return;
-  }
-  request->send(200, "application/json", body);
-}
-
 void handleApiPostMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   Serial.println("[HTTP] /api/mode called");
   String body = String((const char*)data, len);
@@ -500,8 +486,6 @@ void httpSetup() {
     request->send(LittleFS, "/index.html", "text/html", false);
   });
 
-  // asyncServer.on("/api/echo", HTTP_POST, handleApiPostEcho);
-  asyncServer.on("/api/echo", HTTP_POST, handleApiPostRequest, nullptr, handleApiPostEcho);
   asyncServer.on("/api/brightness", HTTP_GET, handleApiGetBrightness);
   asyncServer.on("/api/mode", HTTP_POST, handleApiPostRequest, nullptr, handleApiPostMode);
   asyncServer.on("/api/brightness", HTTP_GET, handleApiGetBrightness);

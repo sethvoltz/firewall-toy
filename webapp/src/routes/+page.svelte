@@ -1,14 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
-  type EchoResult = {
+  type APIResult = {
     timestamp: string;
     data: any;
   };
 
-  let results: EchoResult[] = [];
-  let echoText: string = "Hello, Firewall Toy!";
-
+  let results: APIResult[] = [];
+  
   let mode: 'flame' | 'static' = 'flame';
   let color = { r: 255, g: 100, b: 255 };
 
@@ -26,32 +25,6 @@
 
   function selectColor(c: { r: number; g: number; b: number }) {
     color = { ...c };
-  }
-
-  async function sendEcho() {
-    try {
-      const response = await fetch('/api/echo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: echoText })
-      });
-      const data = await response.json();
-      results = [
-        ...results,
-        {
-          timestamp: new Date().toLocaleString(),
-          data
-        }
-      ];
-    } catch (error: any) {
-      results = [
-        ...results,
-        {
-          timestamp: new Date().toLocaleString(),
-          data: { error: error.message }
-        }
-      ];
-    }
   }
 
   async function sendMode() {
@@ -220,17 +193,6 @@
 </svelte:head>
 
 <h1 class="text-xl font-bold mb-4">Firewall Toy Control</h1>
-
-<h2 class="text-lg font-semibold mb-3">Send Echo</h2>
-<form on:submit|preventDefault={sendEcho} class="mb-4 flex flex-wrap items-center gap-2">
-  <input
-    type="text"
-    bind:value={echoText}
-    placeholder="Enter echo text"
-    class="input input-bordered w-72 mr-2 px-2 py-1 rounded border border-gray-300 focus:outline-none focus:ring focus:border-blue-400"
-  />
-  <button type="submit" class="btn btn-primary">Send Echo</button>
-</form>
 
 <h2 class="text-lg font-semibold mt-8 mb-3">Set Mode & Color</h2>
 

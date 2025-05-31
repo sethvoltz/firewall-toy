@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+
   type EchoResult = {
     timestamp: string;
     data: any;
@@ -151,6 +153,66 @@
       nightApiLoading = false;
     }
   }
+
+  // WebSocket state for live LED data
+  let ws: WebSocket | null = null;
+  let wsConnected: boolean = false;
+  let wsError: string = "";
+  let liveBrightness: number | null = null;
+  let liveLeds: { r: number; g: number; b: number }[] = [];
+
+  function cleanupWs() {
+    if (ws) {
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      ws?.close();
+      ws = null;
+    }
+  }
+
+  function connectWs() {
+    wsError = "";
+
+    cleanupWs(); // Always clean up before opening a new one
+
+    try {
+      ws = new WebSocket(`ws://${window.location.host}/ws`);
+      ws.onopen = () => {
+        wsConnected = true;
+        wsError = "";
+      };
+      ws.onclose = () => {
+        wsConnected = false;
+        ws = null;
+        setTimeout(connectWs, 2000);
+      };
+      ws.onerror = (e) => {
+        wsError = "WebSocket error";
+        wsConnected = false;
+      };
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (typeof data.brightness === "number" && Array.isArray(data.leds)) {
+            liveBrightness = data.brightness;
+            liveLeds = data.leds;
+          }
+        } catch (e) {
+          wsError = "Invalid data from WebSocket";
+        }
+      };
+    } catch (e: any) {
+      wsError = e.message;
+    }
+  }
+
+  onMount(() => {
+    getNightSettings();
+    connectWs();
+    return cleanupWs;
+  });
 </script>
 
 <svelte:head>
@@ -249,6 +311,53 @@
     {/if}
   </div>
 </form>
+
+<!-- Live LED State -->
+<h2 class="text-lg font-semibold mt-8 mb-3">Live LED State</h2>
+<div class="mb-4 flex flex-col gap-2">
+  <div class="flex items-center gap-3">
+    {#if wsConnected}
+      <span class="text-green-600">Connected</span>
+    {:else}
+      <span class="text-red-600">Disconnected</span>
+    {/if}
+    {#if wsError}
+      <span class="text-red-500 text-xs ml-2">{wsError}</span>
+    {/if}
+  </div>
+
+  <div class="flex items-center gap-4 mt-2">
+    <span class="font-medium">Brightness:</span>
+    <div class="relative w-48 h-5 rounded overflow-hidden border border-neutral-400 dark:border-neutral-600">
+      <div
+        class="h-full bg-gradient-to-r from-green-950 to-green-100 transition-all duration-200"
+        style="width: {liveBrightness !== null ? (liveBrightness / 255) * 100 : 0}%;"
+      ></div>
+    </div>
+    {#if liveBrightness !== null}
+      <span class="ml-2 font-mono">{liveBrightness}</span>
+    {:else}
+      <span class="ml-2 text-gray-500">(no data)</span>
+    {/if}
+  </div>
+
+  <div class="flex items-center gap-2 mt-2">
+    <span class="font-medium">LEDs:</span>
+    {#if liveLeds.length > 0}
+      <div class="flex flex-wrap gap-1 rounded-xl border p-2 border-gray-100">
+        {#each liveLeds as led, i}
+          <span
+            class="inline-block rounded-full transition-colors duration-500"
+            style="width: 24px; height: 24px; background: rgb({led.r},{led.g},{led.b});"
+            title={`LED ${i}: R${led.r} G${led.g} B${led.b}`}
+          ></span>
+        {/each}
+      </div>
+    {:else}
+      <span class="text-gray-400">(no data)</span>
+    {/if}
+  </div>
+</div>
 
 <button type="button" on:click={clearResults} class="btn mb-2">Clear Results</button>
 <ul class="border p-4 border-dashed rounded">

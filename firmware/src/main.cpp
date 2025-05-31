@@ -10,6 +10,7 @@
 #include <WiFiManager.h>
 #include <WebServer.h>
 #include <NTPClient.h>
+#include <ESPAsyncWebServer.h>
 
 
 // =---------------------------------------------------------------------------------= Settings =--=
@@ -21,6 +22,7 @@
 #define SETTINGS_PATH               "/settings.json"
 #define FLAME_BLEND_STEPS           6
 #define BRIGHTNESS_BLEND_STEPS      150
+#define WEBSOCKET_PUBLISH_MS        500
 
 
 // =----------------------------------------------------------------------------------= Structs =--=
@@ -65,13 +67,18 @@ HSV lerpHSV(const HSV& c1, const HSV& c2, float t);
 HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
 HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
 void httpSetup();
-void handleApiEcho();
-void handleApiMode();
-void handleApiBrightnessGet();
-void handleApiBrightnessPost();
+void handleApiPostRequest(AsyncWebServerRequest *request);
+void handleApiPostEcho(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleApiPostMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleApiGetBrightness(AsyncWebServerRequest *request);
+void handleApiPostBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
 void setModeAndColorFromJson(JsonVariantConst doc);
 void ntpSetup();
 void ntpLoop();
+void wsSetup();
+void wsLoop();
+void broadcastLedState();
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
 
 
 // =----------------------------------------------------------------------------------= Globals =--=
@@ -81,9 +88,18 @@ BrightnessConfig brightnessConfig;
 
 // Network
 bool wifiFeaturesEnabled = false;
-WiFiUDP udp;
-Coap coap(udp);
-WebServer server(80);
+
+// CoAP
+WiFiUDP coapUdp;
+Coap coap(coapUdp);
+
+// NTP Client
+WiFiUDP ntpUdp;
+NTPClient timeClient(ntpUdp, "pool.ntp.org", 0, 60000); // UTC, update every 60s
+
+// AsyncWebServer and WebSocket
+AsyncWebServer asyncServer(80);
+AsyncWebSocket ws("/ws");
 
 // Animation
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -94,10 +110,6 @@ uint8_t currentR = 255, currentG = 110, currentB = 15;
 HSV currentColors[NUM_LEDS];
 HSV targetColors[NUM_LEDS];
 uint8_t flameStep = 0;
-
-// NTP Client
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // UTC, update every 60s
 
 
 // =--------------------------------------------------------------------------------= Functions =--=
@@ -167,6 +179,7 @@ void animationSetup() {
 void animationLoop() {
   static unsigned long lastUpdate = 0;
   static float currentBrightness = BRIGHTNESS;
+  static unsigned long lastBroadcast = 0; // Throttle WebSocket broadcasts
   unsigned long now = millis();
 
   // Determine target brightness based on day/night config and NTP time
@@ -226,6 +239,11 @@ void animationLoop() {
         }
       }
     }
+    // After updating LEDs, broadcast state (throttled)
+    if (now - lastBroadcast >= WEBSOCKET_PUBLISH_MS) {
+      broadcastLedState();
+      lastBroadcast = now;
+    }
   }
 }
 
@@ -238,7 +256,7 @@ void setStatusColor(uint8_t r, uint8_t g, uint8_t b) {
 // CoAP
 void coapSetup() {
   Serial.println("[CoAP] Starting UDP and registering /mode handler");
-  udp.begin(5683);
+  coapUdp.begin(5683);
   coap.server(handlePutMode, "mode");
   Serial.println("[CoAP] CoAP server ready");
 }
@@ -384,32 +402,41 @@ void setModeAndColorFromJson(JsonVariantConst doc) {
 }
 
 // API Handlers
-void handleApiEcho() {
-  Serial.println("[HTTP] /api/echo called");
-  String body = server.arg("plain");
-  Serial.print("[HTTP] Echo body: ");
-  Serial.println(body);
-  server.send(200, "application/json", body);
+void handleApiPostRequest(AsyncWebServerRequest *request) {
+  String path = request->url();
+  Serial.printf("[HTTP] %s called\n", path.c_str());
 }
 
-void handleApiMode() {
+void handleApiPostEcho(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  String body = String((const char*)data, len);
+  Serial.print("[HTTP] /api/echo body: ");
+  Serial.println(body);
+  StaticJsonDocument<192> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  request->send(200, "application/json", body);
+}
+
+void handleApiPostMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   Serial.println("[HTTP] /api/mode called");
-  String body = server.arg("plain");
+  String body = String((const char*)data, len);
   Serial.print("[HTTP] Mode body: ");
   Serial.println(body);
   StaticJsonDocument<192> doc;
   DeserializationError err = deserializeJson(doc, body);
   if (err) {
     Serial.println("[HTTP] Invalid JSON received in /api/mode");
-    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
   }
   setModeAndColorFromJson(doc.as<JsonVariantConst>());
-  server.send(200, "application/json", "{\"status\":\"OK\"}");
+  request->send(200, "application/json", "{\"status\":\"OK\"}");
 }
 
-// --- Brightness API Handlers ---
-void handleApiBrightnessGet() {
+void handleApiGetBrightness(AsyncWebServerRequest *request) {
   StaticJsonDocument<192> doc;
   doc["nightModeEnabled"] = brightnessConfig.nightModeEnabled;
   doc["nightStartHour"] = brightnessConfig.nightStartHour;
@@ -418,60 +445,45 @@ void handleApiBrightnessGet() {
   doc["nightBrightness"] = brightnessConfig.nightBrightness;
   String out;
   serializeJson(doc, out);
-  server.send(200, "application/json", out);
+  request->send(200, "application/json", out);
 }
 
-void handleApiBrightnessPost() {
-  String body = server.arg("plain");
+void handleApiPostBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  String body = String((const char*)data, len);
   StaticJsonDocument<192> doc;
   DeserializationError err = deserializeJson(doc, body);
+
   if (err) {
-    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
   }
+
   if (doc.containsKey("nightModeEnabled")) brightnessConfig.nightModeEnabled = doc["nightModeEnabled"];
   if (doc.containsKey("nightStartHour")) brightnessConfig.nightStartHour = doc["nightStartHour"];
   if (doc.containsKey("nightEndHour")) brightnessConfig.nightEndHour = doc["nightEndHour"];
   if (doc.containsKey("dayBrightness")) brightnessConfig.dayBrightness = doc["dayBrightness"];
   if (doc.containsKey("nightBrightness")) brightnessConfig.nightBrightness = doc["nightBrightness"];
+
   saveSettings();
-  server.send(200, "application/json", "{\"status\":\"OK\"}");
+  request->send(200, "application/json", "{\"status\":\"OK\"}");
 }
 
 // HTTP Server
 void httpSetup() {
-  server.on("/", HTTP_GET, []() {
-    File file = LittleFS.open("/index.html", "r");
-    if (!file) {
-      server.send(404, "text/plain", "index.html not found");
-      return;
-    }
-    server.streamFile(file, "text/html");
-    file.close();
+  asyncServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/index.html", "text/html", false);
   });
 
-  server.on("/favicon.png", HTTP_GET, []() {
-    File file = LittleFS.open("/favicon.png", "r");
-    if (!file) {
-      server.send(404, "text/plain", "favicon.png not found");
-      return;
-    }
-
-    server.streamFile(file, "image/png");
-    file.close();
+  asyncServer.on("/favicon.png", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/favicon.png", "image/png", false);
   });
 
   // Serve all /_app/* files dynamically from LittleFS
-  server.onNotFound([]() {
-    String path = server.uri();
+  asyncServer.onNotFound([](AsyncWebServerRequest *request) {
+    String path = request->url();
+    Serial.printf("[HTTP] Not found handler: %s\n", path.c_str());
+
     if (path.startsWith("/_app/")) {
-      String fsPath = path;
-      File file = LittleFS.open(fsPath.c_str(), "r");
-      if (!file) {
-        server.send(404, "text/plain", "File not found");
-        return;
-      }
-      // Basic content type detection
       String contentType = "application/octet-stream";
       if (path.endsWith(".js")) contentType = "application/javascript";
       else if (path.endsWith(".css")) contentType = "text/css";
@@ -479,33 +491,63 @@ void httpSetup() {
       else if (path.endsWith(".png")) contentType = "image/png";
       else if (path.endsWith(".ico")) contentType = "image/x-icon";
       else if (path.endsWith(".html")) contentType = "text/html";
-      server.streamFile(file, contentType);
-      file.close();
+
+      request->send(LittleFS, path, contentType, false);
       return;
     }
 
     // Fallback: serve index.html for SPA routing
-    File file = LittleFS.open("/index.html", "r");
-    if (!file) {
-      server.send(404, "text/plain", "index.html not found");
-      return;
-    }
-
-    server.streamFile(file, "text/html");
-    file.close();
+    request->send(LittleFS, "/index.html", "text/html", false);
   });
 
-  server.on("/api/echo", HTTP_POST, handleApiEcho);
-  server.on("/api/mode", HTTP_POST, handleApiMode);
-  server.on("/api/brightness", HTTP_GET, handleApiBrightnessGet);
-  server.on("/api/brightness", HTTP_POST, handleApiBrightnessPost);
+  // asyncServer.on("/api/echo", HTTP_POST, handleApiPostEcho);
+  asyncServer.on("/api/echo", HTTP_POST, handleApiPostRequest, nullptr, handleApiPostEcho);
+  asyncServer.on("/api/brightness", HTTP_GET, handleApiGetBrightness);
+  asyncServer.on("/api/mode", HTTP_POST, handleApiPostRequest, nullptr, handleApiPostMode);
+  asyncServer.on("/api/brightness", HTTP_GET, handleApiGetBrightness);
+  asyncServer.on("/api/brightness", HTTP_POST, handleApiPostRequest, nullptr, handleApiPostBrightness);
 
-  server.begin();
-  Serial.println("[HTTP] Web server started on port 80");
+  Serial.println("[HTTP] Async web server started on port 80");
 }
 
-void httpLoop() {
-  server.handleClient();
+void wsSetup() {
+  ws.onEvent(onWsEvent);
+  asyncServer.addHandler(&ws);
+  asyncServer.begin();
+  Serial.println("[WS] AsyncWebSocket server started on /ws");
+}
+
+void wsLoop() {
+  ws.cleanupClients();
+}
+
+void broadcastLedState() {
+  StaticJsonDocument<384> doc;
+
+  doc["brightness"] = strip.getBrightness();
+
+  JsonArray leds = doc.createNestedArray("leds");
+  for (int i = 0; i < NUM_LEDS; i++) {
+    uint32_t c = strip.getPixelColor(i);
+    uint8_t r = (c >> 16) & 0xFF;
+    uint8_t g = (c >> 8) & 0xFF;
+    uint8_t b = c & 0xFF;
+    JsonObject led = leds.createNestedObject();
+    led["r"] = r;
+    led["g"] = g;
+    led["b"] = b;
+  }
+  
+  String out;
+  serializeJson(doc, out);
+  ws.textAll(out);
+}
+
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    // Send initial state on connect
+    broadcastLedState();
+  }
 }
 
 // NTP Client
@@ -538,6 +580,7 @@ void setup() {
     coapSetup();
     httpSetup();
     ntpSetup();
+    wsSetup();
   }
 }
 
@@ -546,7 +589,7 @@ void loop() {
 
   if (wifiFeaturesEnabled) {
     coapLoop();
-    httpLoop();
     ntpLoop();
+    wsLoop(); // Handle AsyncWebSocket cleanup
   }
 }

@@ -20,11 +20,8 @@ export default defineConfig(({ mode }) => {
 		},
 		server: {
 			proxy: {
-				'/api': {
-					target: `http://${apiIp}`,
-					changeOrigin: true,
-					rewrite: (path) => path // keep /api prefix
-				}
+				'/api': { target: `http://${apiIp}`, changeOrigin: true },
+				'/ws': { target: `http://${apiIp}`, changeOrigin: true, ws: true }
 			}
 		},
 		test: {

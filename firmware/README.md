@@ -6,7 +6,6 @@ This firmware provides the following features:
 
 - Captive portal for easy WiFi setup
 - Web interface for controlling the device
-- CoAP interface for controlling the device
 - mDNS support for easy discovery
 
 
@@ -23,22 +22,12 @@ This firmware provides the following features:
 
 ## Usage
 
-Once the firmware is uploaded, the device will start in access point mode. Connect to the WiFi network named `FirewallToy` and open a web browser to `http://<device-ip>` or `http://firewalltoy.local` to access the web interface. Generally, however, your machine will detect that it is a captive portal and redirect you to the setup page automatically. Once you set up the WiFi credentials, the device will reboot and connect to your WiFi network, showing the default animation on the flame display. To communicate with the device, you can either use the web interface or the CoAP interface.
+Once the firmware is uploaded, the device will start in access point mode. Connect to the WiFi network named `FirewallToy` and open a web browser to `http://<device-ip>` or `http://firewalltoy.local` to access the web interface. Generally, however, your machine will detect that it is a captive portal and redirect you to the setup page automatically. Once you set up the WiFi credentials, the device will reboot and connect to your WiFi network, showing the default animation on the flame display. To communicate with the device, you can either use the web interface or direct API calls.
+
 
 ### Web Interface
 
 Access the web interface by navigating to `http://<device-ip>` or `http://firewalltoy.local` in your web browser. The web interface allows you to control the device's mode and color settings. You can change the mode to "flame", "rainbow", or "off", and set the color using RGB values.
-
-### CoAP Interface
-
-Make CoAP requests to the device using `coap-client`:
-
-```bash
-brew install libcoap
-coap-client -m put -e '{"mode":"flame","color":{"r":255,"g":0,"b":255}}' coap://<ip>/mode
-```
-
-**Note:** While you can use the mDNS name in the `coap://` URL, there seems to be an issue with resolution within `coap-client` that makes it slow (~5s per request). IP addresses return instantly.
 
 
 ## Kudos

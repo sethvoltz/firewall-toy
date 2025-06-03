@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
-#include <coap-simple.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -24,7 +23,6 @@
 #define FLAME_BLEND_STEPS           6
 #define BRIGHTNESS_BLEND_STEPS      150
 #define WEBSOCKET_PUBLISH_MS        500
-
 
 // =----------------------------------------------------------------------------------= Structs =--=
 
@@ -56,14 +54,10 @@ struct HSV {
 void filesystemSetup();
 void animationSetup();
 void animationLoop();
-void animationFrame();
-void coapSetup();
-void coapLoop();
 void wifiSetup();
 void mdnsSetup();
 void loadSettings();
 void saveSettings();
-void handlePutMode(CoapPacket &packet, IPAddress ip, int port);
 void setStatusColor(uint8_t r, uint8_t g, uint8_t b);
 HSV lerpHSV(const HSV& c1, const HSV& c2, float t);
 HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
@@ -90,17 +84,13 @@ BrightnessConfig brightnessConfig;
 // Network
 bool wifiFeaturesEnabled = false;
 
-// CoAP
-WiFiUDP coapUdp;
-Coap coap(coapUdp);
-
 // NTP Client
 WiFiUDP ntpUdp;
 NTPClient timeClient(ntpUdp, "pool.ntp.org", 0, 60000); // UTC, update every 60s
 
 // AsyncWebServer and WebSocket
-AsyncWebServer asyncServer(80);
-AsyncWebSocket ws("/ws");
+static AsyncWebServer asyncServer(80);
+static AsyncWebSocket ws("/ws");
 
 // Animation
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -256,41 +246,6 @@ void setStatusColor(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 
-// CoAP
-void coapSetup() {
-  Serial.println("[CoAP] Starting UDP and registering /mode handler");
-  coapUdp.begin(5683);
-  coap.server(handlePutMode, "mode");
-  Serial.println("[CoAP] CoAP server ready");
-}
-
-void coapLoop() {
-  coap.loop();
-}
-
-void handlePutMode(CoapPacket &packet, IPAddress ip, int port) {
-  Serial.print("[CoAP] PUT /mode from ");
-  Serial.print(ip);
-  Serial.print(", payload: ");
-  for (size_t i = 0; i < packet.payloadlen; i++) Serial.print((char)packet.payload[i]);
-  Serial.println();
-
-  // Parse JSON payload
-  StaticJsonDocument<192> doc;
-  DeserializationError err = deserializeJson(doc, packet.payload, packet.payloadlen);
-
-  if (err) {
-    Serial.println("[CoAP] Invalid JSON received");
-    coap.sendResponse(ip, port, packet.messageid, "Invalid JSON");
-    return;
-  }
-
-  setModeAndColorFromJson(doc.as<JsonVariantConst>());
-  coap.sendResponse(ip, port, packet.messageid, "OK");
-  Serial.println("[CoAP] LED color updated and response sent");
-}
-
-
 // WIFI & mDNS
 void wifiSetup() {
   setStatusColor(0, 0, 255);
@@ -323,7 +278,7 @@ void mdnsSetup() {
     Serial.print("[mDNS] mDNS responder started as ");
     Serial.print(settings.mdnsName);
     Serial.println(".local");
-    MDNS.addService("_coap", "_udp", 5683);
+    MDNS.addService("_http", "_tcp", 80);
   }
 }
 
@@ -364,7 +319,6 @@ void saveSettings() {
   preferences.end();
 }
 
-// --- Mode/Color Setter (shared by CoAP and HTTP) ---
 void setModeAndColorFromJson(JsonVariantConst doc) {
   // Expecting: {"mode": "static"|"flame", "color": {"r":0-255, "g":0-255, "b":0-255}}
   const char* mode = doc["mode"] | "static";
@@ -549,7 +503,6 @@ void setup() {
 
   if (wifiFeaturesEnabled) {
     mdnsSetup();
-    coapSetup();
     httpSetup();
     ntpSetup();
     wsSetup();
@@ -560,7 +513,6 @@ void loop() {
   animationLoop();
 
   if (wifiFeaturesEnabled) {
-    coapLoop();
     ntpLoop();
     wsLoop(); // Handle AsyncWebSocket cleanup
   }

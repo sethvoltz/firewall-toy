@@ -7,38 +7,92 @@
   let liveBrightness: number | null = null;
   let liveLeds: { r: number; g: number; b: number }[] = [];
 
+  const HEARTBEAT_TIMEOUT = 1000;
+  const CONNECTION_TIMEOUT = 1000;
+  const RECONNECT_DELAY_MAX = 8000;
+
+  let lastMessageTime: number = 0;
+  let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  let reconnectDelay = 500;
+
   function cleanupWs() {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
     if (ws) {
       ws.onopen = null;
       ws.onclose = null;
       ws.onerror = null;
       ws.onmessage = null;
-      ws?.close();
+      ws.close();
       ws = null;
     }
   }
 
   function connectWs() {
     wsError = "";
-
     cleanupWs(); // Always clean up before opening a new one
 
+    let connectionTimeout: ReturnType<typeof setTimeout> | null = null;
     try {
       ws = new WebSocket(`ws://${window.location.host}/ws`);
+
+      // Manual connection timeout (e.g. 1s)
+      connectionTimeout = setTimeout(() => {
+        if (ws && ws.readyState === WebSocket.CONNECTING) {
+          wsError = "WebSocket connection timed out";
+          ws.close(); // This will trigger onclose and reconnect
+        }
+      }, CONNECTION_TIMEOUT);
+
       ws.onopen = () => {
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
         wsConnected = true;
         wsError = "";
+        lastMessageTime = Date.now();
+        reconnectDelay = 500; // Reset delay on successful connect
+        if (!heartbeatInterval) {
+          heartbeatInterval = setInterval(() => {
+            if (wsConnected && Date.now() - lastMessageTime > HEARTBEAT_TIMEOUT) {
+              wsError = "Connection lost (timeout)";
+              wsConnected = false;
+              ws?.close(); // This will trigger onclose and reconnect
+            }
+          }, HEARTBEAT_TIMEOUT / 2); // Nyquist-ish
+        }
       };
+
       ws.onclose = () => {
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
         wsConnected = false;
         ws = null;
-        setTimeout(connectWs, 2000);
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+        console.log(`WebSocket closed, attempting to reconnect in ${reconnectDelay}ms...`);
+        setTimeout(connectWs, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_DELAY_MAX);
       };
+
       ws.onerror = (e) => {
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
         wsError = "WebSocket error";
         wsConnected = false;
       };
+
       ws.onmessage = (event) => {
+        lastMessageTime = Date.now();
         try {
           const data = JSON.parse(event.data);
           if (typeof data.brightness === "number" && Array.isArray(data.leds)) {
@@ -50,6 +104,10 @@
         }
       };
     } catch (e: any) {
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+        connectionTimeout = null;
+      }
       wsError = e.message;
     }
   }

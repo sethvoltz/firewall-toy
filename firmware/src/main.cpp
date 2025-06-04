@@ -110,7 +110,7 @@ static AsyncWebSocket ws("/ws");
 // Animation
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 AnimationMode currentMode = ANIMATION_FLAME;
-uint8_t currentR = 255, currentG = 110, currentB = 15;
+uint8_t currentR = 255, currentG = 170, currentB = 20;
 
 // Flame animation state
 HSV previousColors[NUM_LEDS];

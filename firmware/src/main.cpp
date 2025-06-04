@@ -1,35 +1,33 @@
 #include <Arduino.h>
+#include <FS.h>
+#include <LittleFS.h>
+#include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <ESPmDNS.h>
-#include <FS.h>
-#include <LittleFS.h>
 #include <WiFiManager.h>
 #include <WebServer.h>
+#include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <ESPAsyncWebServer.h>
-#include <Preferences.h>
 
 
 // =---------------------------------------------------------------------------------= Settings =--=
 
+// Animation
 #define LED_PIN                     D1
 #define NUM_LEDS                    3
 #define BRIGHTNESS                  128
 #define ANIMATION_MS                33
-#define SETTINGS_PATH               "/settings.json"
 #define FLAME_BLEND_STEPS           6
 #define BRIGHTNESS_BLEND_STEPS      150
+
+// Webserver
 #define WEBSOCKET_PUBLISH_MS        500
 
-// =----------------------------------------------------------------------------------= Structs =--=
 
-enum AnimationMode {
-  ANIMATION_STATIC,
-  ANIMATION_FLAME
-};
+// =----------------------------------------------------------------------------------= Structs =--=
 
 struct Settings {
   String mdnsName = "firewalltoy";
@@ -43,43 +41,60 @@ struct BrightnessConfig {
   uint8_t nightBrightness = 32;
 };
 
+enum AnimationMode {
+  ANIMATION_STATIC,
+  ANIMATION_FLAME
+};
+
 struct HSV {
   float h, s, v;
+};
+
+struct RGB {
+  uint8_t r, g, b;
 };
 
 
 // =-------------------------------------------------------------------------------= Signatures =--=
 
-// TODO: Move to header file
+// Filesystem and Preferences
 void filesystemSetup();
-void animationSetup();
-void animationLoop();
-void wifiSetup();
-void mdnsSetup();
 void loadSettings();
 void saveSettings();
-void setStatusColor(uint8_t r, uint8_t g, uint8_t b);
-HSV lerpHSV(const HSV& c1, const HSV& c2, float t);
-HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
-HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
+
+// Network
+void wifiSetup();
+void mdnsSetup();
 void httpSetup();
+void ntpSetup();
+void ntpLoop();
+void websocketSetup();
+void websocketLoop();
+void broadcastLedState();
+void onWebsocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
+
+// API Handlers
 void handleApiPostRequest(AsyncWebServerRequest *request);
 void handleApiPostMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
 void handleApiGetBrightness(AsyncWebServerRequest *request);
 void handleApiPostBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
 void setModeAndColorFromJson(JsonVariantConst doc);
-void ntpSetup();
-void ntpLoop();
-void wsSetup();
-void wsLoop();
-void broadcastLedState();
-void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
+
+// Animation
+void animationSetup();
+void animationLoop();
+void setStatusColor(uint8_t r, uint8_t g, uint8_t b);
+HSV lerpHSV(const HSV& c1, const HSV& c2, float t);
+HSV flameColor(const HSV& base, float h_jitter, float s_jitter, float v_jitter);
+HSV rgbToHsv(uint8_t r, uint8_t g, uint8_t b);
 
 
 // =----------------------------------------------------------------------------------= Globals =--=
 
+// Settings
 Settings settings;
 BrightnessConfig brightnessConfig;
+Preferences preferences;
 
 // Network
 bool wifiFeaturesEnabled = false;
@@ -98,11 +113,10 @@ AnimationMode currentMode = ANIMATION_FLAME;
 uint8_t currentR = 255, currentG = 110, currentB = 15;
 
 // Flame animation state
-HSV currentColors[NUM_LEDS];
+HSV previousColors[NUM_LEDS];
 HSV targetColors[NUM_LEDS];
+RGB currentColors[NUM_LEDS];
 uint8_t flameStep = 0;
-
-Preferences preferences;
 
 
 // =--------------------------------------------------------------------------------= Functions =--=
@@ -162,8 +176,9 @@ void animationSetup() {
   // Initialize flame animation state
   HSV base = rgbToHsv(currentR, currentG, currentB);
   for (int i = 0; i < NUM_LEDS; i++) {
-    currentColors[i] = base;
+    previousColors[i] = base;
     targetColors[i] = flameColor(base);
+    currentColors[i] = { currentR, currentG, currentB };
   }
 
   setStatusColor(0, 255, 255);
@@ -205,28 +220,30 @@ void animationLoop() {
     lastUpdate = now;
 
     if (currentMode == ANIMATION_STATIC) {
-      uint32_t color = strip.Color(currentR, currentG, currentB);
       for (int i = 0; i < NUM_LEDS; i++) {
-        strip.setPixelColor(i, color);
+        strip.setPixelColor(i, strip.gamma32(strip.Color(currentR, currentG, currentB)));
+        currentColors[i] = { currentR, currentG, currentB };
       }
       strip.show();
     } else if (currentMode == ANIMATION_FLAME) {
       float t = (float)flameStep / (float)FLAME_BLEND_STEPS;
       for (int i = 0; i < NUM_LEDS; i++) {
-        HSV blended = lerpHSV(currentColors[i], targetColors[i], t);
+        HSV blended = lerpHSV(previousColors[i], targetColors[i], t);
         uint32_t color = strip.ColorHSV(
           (uint16_t)(blended.h * 65535.0f),
           (uint8_t)(blended.s * 255.0f),
           (uint8_t)(blended.v * 255.0f)
         );
-        strip.setPixelColor(i, color);
+        strip.setPixelColor(i, strip.gamma32(color));
+        currentColors[i] = { (uint8_t)(color >> 16), (uint8_t)((color >> 8) & 0xFF), (uint8_t)(color & 0xFF) };
       }
       strip.show();
+
       flameStep++;
       if (flameStep > FLAME_BLEND_STEPS) {
         flameStep = 0;
         for (int i = 0; i < NUM_LEDS; i++) {
-          currentColors[i] = targetColors[i];
+          previousColors[i] = targetColors[i];
           HSV base = rgbToHsv(currentR, currentG, currentB);
           targetColors[i] = flameColor(base);
         }
@@ -241,7 +258,7 @@ void animationLoop() {
 }
 
 void setStatusColor(uint8_t r, uint8_t g, uint8_t b) {
-  strip.fill(strip.Color(r, g, b));
+  strip.fill(strip.gamma32(strip.Color(r, g, b)));
   strip.show();
 }
 
@@ -435,14 +452,14 @@ void httpSetup() {
   Serial.println("[HTTP] Async web server started on port 80");
 }
 
-void wsSetup() {
-  ws.onEvent(onWsEvent);
+void websocketSetup() {
+  ws.onEvent(onWebsocketEvent);
   asyncServer.addHandler(&ws);
   asyncServer.begin();
   Serial.println("[WS] AsyncWebSocket server started on /ws");
 }
 
-void wsLoop() {
+void websocketLoop() {
   ws.cleanupClients();
 }
 
@@ -453,14 +470,10 @@ void broadcastLedState() {
 
   JsonArray leds = doc.createNestedArray("leds");
   for (int i = 0; i < NUM_LEDS; i++) {
-    uint32_t c = strip.getPixelColor(i);
-    uint8_t r = (c >> 16) & 0xFF;
-    uint8_t g = (c >> 8) & 0xFF;
-    uint8_t b = c & 0xFF;
     JsonObject led = leds.createNestedObject();
-    led["r"] = r;
-    led["g"] = g;
-    led["b"] = b;
+    led["r"] = currentColors[i].r;
+    led["g"] = currentColors[i].g;
+    led["b"] = currentColors[i].b;
   }
   
   String out;
@@ -468,7 +481,7 @@ void broadcastLedState() {
   ws.textAll(out);
 }
 
-void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+void onWebsocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
   if (type == WS_EVT_CONNECT) {
     // Send initial state on connect
     broadcastLedState();
@@ -503,9 +516,9 @@ void setup() {
 
   if (wifiFeaturesEnabled) {
     mdnsSetup();
-    httpSetup();
     ntpSetup();
-    wsSetup();
+    httpSetup();
+    websocketSetup();
   }
 }
 
@@ -514,6 +527,6 @@ void loop() {
 
   if (wifiFeaturesEnabled) {
     ntpLoop();
-    wsLoop(); // Handle AsyncWebSocket cleanup
+    websocketLoop(); // Handle AsyncWebSocket cleanup
   }
 }
